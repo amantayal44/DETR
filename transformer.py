@@ -3,7 +3,7 @@ import tensorflow as tf
 from tensorflow.keras.applications import ResNet50
 
 d_model = 256
-max_length = 2048 #maximum source seq lenth
+max_length = 1012 #maximum source seq lenth
 num_layers_encoder = 6
 num_decoder_layer = 6
 
@@ -52,6 +52,8 @@ class MultiHeadAttention(tf.keras.Model):
         self.wk = tf.keras.layers.Dense(d_model) 
         self.wv = tf.keras.layers.Dense(d_model) 
         self.wo = tf.keras.layers.Dense(d_model)
+        self.reshape1 = tf.keras.layers.Reshape((-1,self.h,self.key_size))
+        self.reshape2 = tf.keras.layers.Reshape((-1,self.h*self.key_size))
 
     def call(self, query, value, mask=None):
         """ The forward pass for Multi-Head Attention layer
@@ -73,18 +75,18 @@ class MultiHeadAttention(tf.keras.Model):
         value = self.wv(value)
         
         # Split matrices for multi-heads attention
-        batch_size = query.get_shape().as_list()[0]
+        # batch_size = query.get_shape().as_list()[0]
         
         # Originally, query has shape (batch, query_len, d_model)
         # We need to reshape to (batch, query_len, h, key_size)
-        query = tf.reshape(query, (batch_size, -1, self.h, self.key_size))
+        query = self.reshape1(query)
         # In order to compute matmul, the dimensions must be transposed to (batch, h, query_len, key_size)
         query = tf.transpose(query, [0, 2, 1, 3])
         
         # Do the same for key and value
-        key = tf.reshape(key, (batch_size, -1, self.h, self.key_size))
+        key = self.reshape1(key)
         key = tf.transpose(key, [0, 2, 1, 3])
-        value = tf.reshape(value, (batch_size, -1, self.h, self.key_size))
+        value = self.reshape1(value)
         value = tf.transpose(value, [0, 2, 1, 3])
         
         # Compute the dot score
@@ -112,7 +114,7 @@ class MultiHeadAttention(tf.keras.Model):
         
         # Finally, do the opposite to have a tensor of shape (batch, query_len, d_model)
         context = tf.transpose(context, [0, 2, 1, 3])
-        context = tf.reshape(context, (batch_size, -1, self.key_size * self.h))
+        context = self.reshape2(context)
         
         # Apply one last full connected layer (WO)
         heads = self.wo(context)
@@ -319,13 +321,14 @@ class DETR(tf.keras.Model):
     """
     def __init__(self,d_model = 256,nhead = 8,num_decoder_layer = 6,num_encoder_layer = 6,num_classes = 1000,num_query = 100):
         super(DETR, self).__init__()
+        self.d_model = d_model
         self.backbone = ResNet50(include_top = False,input_shape=(224,224,3),weights=None)
         self.conv2d = tf.keras.layers.Conv2D(d_model,1)
         self.encoder = Encoder(d_model,num_encoder_layer,nhead)
         self.decoder = Decoder(d_model,num_decoder_layer,nhead)
         self.linear_class = tf.keras.layers.Dense(num_classes+1,activation='softmax')
         self.linear_bbox = tf.keras.layers.Dense(4,activation='sigmoid')
-        self.query_pos = tf.constant(tf.random.uniform(shape=(num_query,d_model)))
+        self.query_pos = tf.constant(tf.random.uniform(shape=(max_length,num_query,d_model)))
 
     def call(self,inputs,training=True):
         """ Forward pass for the Decoder
@@ -339,11 +342,15 @@ class DETR(tf.keras.Model):
         """
         x = self.backbone(inputs)
         x = self.conv2d(x)
-        shape = x.get_shape().as_list()
-        x = tf.reshape(x,shape=(-1,shape[1]*shape[2],shape[3]))
+        print(x.shape)
+        size = x.get_shape().as_list()
+        x = tf.keras.layers.Reshape((size[1]*size[2],self.d_model))(x)
+        print(x.shape)
         encoder_output, _ = self.encoder(x,training=training)
-        query_shape = (shape[0],self.query_pos.shape[0],self.query_pos.shape[1])
-        logits, _, _ = self.decoder(tf.ones(shape=query_shape)*self.query_pos,encoder_output,training=training)
+        print(encoder_output.shape)
+        # stacking query_pos batch_size times
+        logits, _, _ = self.decoder(self.query_pos[:tf.shape(encoder_output)[0],:,:],encoder_output,training=training)
+        # logits = encoder_output
         pred_logits = self.linear_class(logits)
         pred_boxes = self.linear_bbox(logits)
         return pred_logits,pred_boxes
@@ -352,3 +359,4 @@ detr = DETR()
 inputs =  tf.keras.Input(shape=(224,224,3))
 outputs, _ = detr(inputs)
 model = tf.keras.Model(inputs=inputs,outputs=outputs)
+model.summary()
